@@ -1,10 +1,11 @@
 // ============================================================
-//  MineBean Auto Deploy Bot v2
+//  MineBean Auto Deploy Bot v3
 //  Chain: Base Mainnet (8453)
 // ============================================================
 import "dotenv/config";
 import { ethers } from "ethers";
 import fetch from "node-fetch";
+import EventSource from "eventsource";
 
 // ── Config ───────────────────────────────────────────────────
 const CFG = {
@@ -12,20 +13,20 @@ const CFG = {
   rpcUrl:          process.env.BASE_RPC_URL        || "https://mainnet.base.org",
   tgToken:         process.env.TELEGRAM_BOT_TOKEN  || "",
   tgChat:          process.env.TELEGRAM_CHAT_ID    || "",
-  totalRounds:     parseInt(process.env.TOTAL_ROUNDS)         || 10,
-  blocksPerDeploy: parseInt(process.env.BLOCKS_PER_DEPLOY)    || 5,
-  ethPerRound:     process.env.ETH_PER_ROUND                  || "0.0000125",
-  strategy:        process.env.BLOCK_STRATEGY                 || "least_crowded",
+  totalRounds:     parseInt(process.env.TOTAL_ROUNDS)           || 10,
+  blocksPerDeploy: parseInt(process.env.BLOCKS_PER_DEPLOY)      || 5,
+  ethPerRound:     process.env.ETH_PER_ROUND                    || "0.0000125",
+  strategy:        process.env.BLOCK_STRATEGY                   || "least_crowded",
   deploySecsLeft:  parseInt(process.env.DEPLOY_AT_SECONDS_LEFT) || 15,
-  claimEvery:      parseInt(process.env.CLAIM_EVERY_N_ROUNDS)  || 5,
-  claimEthMin:     parseFloat(process.env.CLAIM_ETH_MIN)       || 0.0005,
+  claimEvery:      parseInt(process.env.CLAIM_EVERY_N_ROUNDS)   || 5,
+  claimEthMin:     parseFloat(process.env.CLAIM_ETH_MIN)        || 0.0005,
 };
 
-// Validasi & auto-fix minimum ETH
+// Auto-fix minimum ETH
 const MIN_PER_BLOCK = 0.0000025;
 const minNeeded = MIN_PER_BLOCK * CFG.blocksPerDeploy;
 if (parseFloat(CFG.ethPerRound) < minNeeded) {
-  console.warn(`⚠️  ETH_PER_ROUND terlalu kecil, otomatis pakai minimum: ${minNeeded}`);
+  console.warn(`⚠️  ETH_PER_ROUND terlalu kecil, pakai minimum: ${minNeeded}`);
   CFG.ethPerRound = minNeeded.toFixed(10);
 }
 
@@ -36,7 +37,6 @@ const GRID_ABI  = [
   "function claimETH()",
   "function getTotalPendingRewards(address user) view returns (uint256 pendingETH, uint256 unroastedBEAN, uint256 roastedBEAN, uint64 uncheckpointedRound)",
   "function getPendingBEAN(address user) view returns (uint256 gross, uint256 fee, uint256 net)",
-  "function beanpotPool() view returns (uint256)",
 ];
 
 const API_BASE = "https://api.minebean.com";
@@ -53,7 +53,7 @@ let totalSpentWei   = 0n;
 let totalClaimedWei = 0n;
 let sessionStart    = Date.now();
 let deployTimer     = null;
-let sseInstance     = null;
+let currentRoundId  = null;
 
 // ── Helpers ──────────────────────────────────────────────────
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -71,9 +71,7 @@ async function tg(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: CFG.tgChat, text, parse_mode: "HTML" }),
     });
-  } catch (e) {
-    log(`[TG] ${e.message}`);
-  }
+  } catch (e) { log(`[TG] ${e.message}`); }
 }
 
 async function apiGet(path) {
@@ -82,39 +80,42 @@ async function apiGet(path) {
   return res.json();
 }
 
+// FIX UTAMA: Hitung sisa waktu dari endTime (unix detik), bukan pakai timeRemaining
+// timeRemaining di API response bisa null/undefined/0 — tidak bisa diandalkan
+function getSecsLeft(endTime) {
+  const end = Number(endTime);
+  if (!end || isNaN(end)) return 0;
+  return Math.max(0, Math.floor((end * 1000 - Date.now()) / 1000));
+}
+
 // ── Pilih blok ───────────────────────────────────────────────
 function pickBlocks(blocks) {
   const n = CFG.blocksPerDeploy;
+
+  if (!blocks || blocks.length === 0) {
+    // Fallback random kalau tidak ada data
+    const all = Array.from({ length: 25 }, (_, i) => i);
+    for (let i = 24; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    return all.slice(0, n).sort((a, b) => a - b);
+  }
+
   if (CFG.strategy === "least_crowded") {
     return [...blocks]
-      .sort((a, b) => parseFloat(a.deployedFormatted) - parseFloat(b.deployedFormatted))
+      .sort((a, b) => parseFloat(a.deployedFormatted || "0") - parseFloat(b.deployedFormatted || "0"))
       .slice(0, n)
       .map(b => b.id)
       .sort((a, b) => a - b);
   }
-  // random
+
   const all = Array.from({ length: 25 }, (_, i) => i);
   for (let i = 24; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [all[i], all[j]] = [all[j], all[i]];
   }
   return all.slice(0, n).sort((a, b) => a - b);
-}
-
-// ── EV check ─────────────────────────────────────────────────
-async function getEVLine() {
-  try {
-    const [p, r] = await Promise.all([apiGet("/api/price"), apiGet("/api/round/current")]);
-    const price  = parseFloat(p.bean.priceNative);
-    const bpPool = parseFloat(r.beanpotPoolFormatted || "0");
-    const cost   = parseFloat(CFG.ethPerRound) * 0.11;
-    const bVal   = 1.0 * price;
-    const bpEV   = (1 / 777) * bpPool * price;
-    const net    = bVal + bpEV - cost;
-    return `\n\n📊 <b>EV/round:</b> <code>${net >= 0 ? "+" : ""}${net.toFixed(8)} ETH</code> ${net >= 0 ? "✅" : "⚠️"}`;
-  } catch {
-    return "";
-  }
 }
 
 // ── Deploy ───────────────────────────────────────────────────
@@ -126,18 +127,26 @@ async function doDeploy(roundId) {
 
   log(`Round ${roundId}: mulai deploy...`);
 
-  // Fetch grid untuk pilih blok
+  // Fetch grid
   let round;
   try {
     round = await apiGet(`/api/round/current?user=${wallet.address}`);
+    log(`Grid OK: roundId=${round.roundId}, pool=${round.totalDeployedFormatted} ETH, sisa=${getSecsLeft(round.endTime)}s`);
   } catch (e) {
-    log(`Gagal fetch grid: ${e.message} — pakai random blocks`);
-    round = { blocks: Array.from({ length: 25 }, (_, i) => ({ id: i, deployedFormatted: "0" })), totalDeployedFormatted: "?", beanpotPoolFormatted: "?" };
+    log(`Gagal fetch grid: ${e.message} — pakai random`);
+    round = { blocks: [], totalDeployedFormatted: "?", beanpotPoolFormatted: "?" };
   }
 
-  // Cek apakah round masih aktif
-  if (round.settled) {
-    log(`Round ${roundId}: sudah settled, skip.`);
+  // Cek round tidak sudah berganti
+  if (round.roundId && Number(round.roundId) !== Number(roundId)) {
+    log(`Round ${roundId} sudah kedaluwarsa (now: ${round.roundId}), skip.`);
+    return;
+  }
+
+  // Cek waktu masih ada
+  const secsLeft = getSecsLeft(round.endTime);
+  if (secsLeft < 5) {
+    log(`Round ${roundId}: tinggal ${secsLeft}s, terlalu mepet, skip.`);
     return;
   }
 
@@ -145,7 +154,7 @@ async function doDeploy(roundId) {
   const ethValue = ethers.parseEther(CFG.ethPerRound);
   const perBlock = (parseFloat(CFG.ethPerRound) / CFG.blocksPerDeploy).toFixed(8);
 
-  log(`Blok dipilih: [${blocks.join(", ")}] | ${CFG.ethPerRound} ETH total`);
+  log(`Blok: [${blocks.join(", ")}] | ${CFG.ethPerRound} ETH | ${secsLeft}s sisa`);
 
   await tg(
     `🎯 <b>AUTO-MINER RUNNING</b>\n\n` +
@@ -172,61 +181,66 @@ async function doDeploy(roundId) {
     );
 
   } catch (e) {
-    deployedThisRnd = false;
     log(`Deploy error: ${e.message}`);
-
-    // Kalau AlreadyDeployedThisRound, anggap sudah deploy
     if (e.message.includes("AlreadyDeployedThisRound")) {
       deployedThisRnd = true;
-      log("AlreadyDeployedThisRound — dianggap sudah deploy round ini.");
+      log("AlreadyDeployedThisRound — dianggap sudah deploy.");
       return;
     }
-
+    deployedThisRnd = false;
     await tg(`❌ <b>Deploy Gagal Round ${roundId}</b>\n<code>${e.message.slice(0, 200)}</code>`);
   }
 }
 
-// ── Claim ETH ────────────────────────────────────────────────
+// ── Schedule deploy ───────────────────────────────────────────
+function scheduleDeployForRound(roundId, endTime) {
+  if (deployTimer) { clearTimeout(deployTimer); deployTimer = null; }
+
+  const secsLeft = getSecsLeft(endTime);
+  const waitSecs = secsLeft - CFG.deploySecsLeft;
+
+  if (waitSecs <= 0) {
+    log(`Round ${roundId}: langsung deploy (sisa ${secsLeft}s)`);
+    doDeploy(roundId).catch(e => log(`doDeploy error: ${e.message}`));
+  } else {
+    log(`Round ${roundId}: deploy dalam ${waitSecs}s (sisa ${secsLeft}s - ${CFG.deploySecsLeft}s buffer)`);
+    deployTimer = setTimeout(() => {
+      doDeploy(roundId).catch(e => log(`doDeploy error: ${e.message}`));
+    }, waitSecs * 1000);
+  }
+}
+
+// ── Claim ETH ─────────────────────────────────────────────────
 async function tryClaimETH(label) {
   try {
     const [pendingWei] = await contract.getTotalPendingRewards(wallet.address);
     const pending = parseFloat(ethers.formatEther(pendingWei));
     log(`Pending ETH: ${pending.toFixed(6)} ETH`);
-
-    if (pending < CFG.claimEthMin) {
-      log(`Di bawah threshold ${CFG.claimEthMin} ETH, skip claim.`);
-      return;
-    }
+    if (pending < CFG.claimEthMin) { log(`Skip claim (< ${CFG.claimEthMin})`); return; }
 
     const tx = await contract.claimETH();
     await tx.wait();
     totalClaimedWei += pendingWei;
-    log(`Claimed: ${pending.toFixed(6)} ETH`);
-
     await tg(
       `💰 <b>ETH Claimed${label ? ` — ${label}` : ""}!</b>\n` +
       `Amount: <code>${pending.toFixed(6)} ETH</code>\n` +
       `TX: <code>${shortTx(tx.hash)}</code>`
     );
-  } catch (e) {
-    log(`claimETH error: ${e.message}`);
-  }
+  } catch (e) { log(`claimETH error: ${e.message}`); }
 }
 
-// ── Status report ─────────────────────────────────────────────
+// ── Status ────────────────────────────────────────────────────
 async function sendStatus() {
   try {
     const balance = await provider.getBalance(wallet.address);
     const spent   = parseFloat(ethers.formatEther(totalSpentWei));
     const claimed = parseFloat(ethers.formatEther(totalClaimedWei));
     const pnl     = claimed - spent;
-
-    let beanLine = "";
+    let beanLine  = "";
     try {
       const b = await contract.getPendingBEAN(wallet.address);
       beanLine = `\n🫘 BEAN pending: <code>${parseFloat(ethers.formatEther(b.net)).toFixed(4)} BEAN</code>`;
     } catch {}
-
     await tg(
       `📊 <b>Status Report</b>\n\n` +
       `⏱ Durasi: <code>${elapsed()}</code>\n` +
@@ -237,212 +251,97 @@ async function sendStatus() {
       beanLine + `\n` +
       `👛 Saldo: <code>${parseFloat(ethers.formatEther(balance)).toFixed(6)} ETH</code>`
     );
-  } catch (e) {
-    log(`sendStatus error: ${e.message}`);
-  }
+  } catch (e) { log(`sendStatus error: ${e.message}`); }
 }
 
-// ── Schedule deploy untuk round baru ──────────────────────────
-function scheduleDeployForRound(roundId, endTime) {
-  // Batalkan timer sebelumnya kalau ada
-  if (deployTimer) {
-    clearTimeout(deployTimer);
-    deployTimer = null;
-  }
-
-  const deployAt = (endTime * 1000) - (CFG.deploySecsLeft * 1000);
-  const msUntil  = deployAt - Date.now();
-
-  if (msUntil <= 0) {
-    // Langsung deploy kalau sudah mepet
-    log(`Round ${roundId}: waktu mepet, langsung deploy.`);
-    doDeploy(roundId).catch(e => log(`doDeploy error: ${e.message}`));
-  } else {
-    log(`Round ${roundId}: deploy dijadwalkan dalam ${Math.round(msUntil / 1000)}s`);
-    deployTimer = setTimeout(() => {
-      doDeploy(roundId).catch(e => log(`doDeploy error: ${e.message}`));
-    }, msUntil);
-  }
-}
-
-// ── Handle round transition ───────────────────────────────────
+// ── Round transition handler ──────────────────────────────────
 async function onRoundTransition(data) {
   const { settled, newRound } = data;
 
-  // Hitung round yang baru selesai
-  if (deployedThisRnd) {
-    roundsDone++;
-    log(`Round selesai. Total: ${roundsDone}/${CFG.totalRounds}`);
-  }
+  if (deployedThisRnd) { roundsDone++; log(`Round selesai. Total: ${roundsDone}/${CFG.totalRounds}`); }
   deployedThisRnd = false;
 
-  // Log hasil
   if (settled) {
     const bpHit = settled.beanpotAmount && settled.beanpotAmount !== "0";
-    log(`Settled round ${settled.roundId} — winBlock: ${settled.winningBlock}${bpHit ? " 🎰 BEANPOT!" : ""}`);
+    log(`Settled ${settled.roundId} — winBlock: ${settled.winningBlock}${bpHit ? " 🎰 BEANPOT!" : ""}`);
     if (bpHit) {
-      await tg(
-        `🎰 <b>BEANPOT HIT! Round ${settled.roundId}</b>\n` +
-        `Winning block: <code>${settled.winningBlock}</code>\n` +
-        `Jackpot: <code>${ethers.formatEther(settled.beanpotAmount)} BEAN</code>`
-      );
+      await tg(`🎰 <b>BEANPOT HIT! Round ${settled.roundId}</b>\nWinning block: <code>${settled.winningBlock}</code>\nJackpot: <code>${ethers.formatEther(settled.beanpotAmount)} BEAN</code>`);
     }
   }
 
-  // Selesai semua round?
   if (roundsDone >= CFG.totalRounds) {
-    log(`✅ Semua ${CFG.totalRounds} round selesai!`);
     if (deployTimer) clearTimeout(deployTimer);
     await tryClaimETH("Final");
     await sendStatus();
-    await tg(
-      `🏁 <b>AUTO-MINER SELESAI! (${CFG.totalRounds} rounds)</b>\n\n` +
-      `⏱ Total waktu: <code>${elapsed()}</code>\n\n` +
-      `🫘 BEAN ada di wallet kamu!\n` +
-      `Klaim di <a href="https://minebean.com">minebean.com</a> kapanpun.`
-    );
+    await tg(`🏁 <b>AUTO-MINER SELESAI! (${CFG.totalRounds} rounds)</b>\n\n⏱ Total: <code>${elapsed()}</code>\n🫘 BEAN ada di wallet, klaim di <a href="https://minebean.com">minebean.com</a>`);
     process.exit(0);
   }
 
-  // Periodic claim + status
   if (roundsDone > 0 && roundsDone % CFG.claimEvery === 0) {
     await tryClaimETH(`Round ${roundsDone}`);
     await sendStatus();
   }
 
-  // Schedule deploy untuk round baru
   if (newRound) {
-    const rId  = Number(newRound.roundId);
-    const end  = Number(newRound.endTime);
-    log(`New round ${rId} | endTime: ${end}`);
-    scheduleDeployForRound(rId, end);
+    const rId = Number(newRound.roundId);
+    currentRoundId = rId;
+    log(`New round: ${rId} | endTime: ${newRound.endTime}`);
+    scheduleDeployForRound(rId, newRound.endTime);
   }
 }
 
-// ── SSE — connect dengan pure HTTP (lebih stabil) ────────────
+// ── SSE ──────────────────────────────────────────────────────
 function connectSSE() {
-  // Pakai eventsource library
-  import("eventsource").then(({ default: EventSource }) => {
-    let reconnectDelay = 3000;
-
-    function connect() {
-      log("Connecting SSE...");
-      const es = new EventSource(`${API_BASE}/api/events/rounds`);
-
-      es.onopen = () => {
-        log("SSE connected ✓");
-        reconnectDelay = 3000;
-      };
-
-      es.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data);
-          const { type, data } = parsed;
-
-          if (type === "heartbeat") {
-            log("SSE heartbeat ✓");
-            return;
-          }
-
-          if (type === "roundTransition") {
-            log("SSE roundTransition diterima");
-            onRoundTransition(data).catch(e => log(`onRoundTransition error: ${e.message}`));
-            return;
-          }
-
-          if (type === "deployed") {
-            // Opsional: update grid info tapi tidak perlu action
-            return;
-          }
-
-        } catch (e) {
-          log(`SSE parse error: ${e.message}`);
+  let backoff = 3000;
+  function connect() {
+    log("Connecting SSE...");
+    const es = new EventSource(`${API_BASE}/api/events/rounds`);
+    es.onopen = () => { log("SSE connected ✓"); backoff = 3000; };
+    es.onmessage = (event) => {
+      try {
+        const { type, data } = JSON.parse(event.data);
+        if (type === "heartbeat") { log("SSE heartbeat ✓"); }
+        else if (type === "roundTransition") {
+          log("roundTransition diterima");
+          onRoundTransition(data).catch(e => log(`onRoundTransition err: ${e.message}`));
         }
-      };
-
-      es.onerror = (err) => {
-        log(`SSE error. Reconnect dalam ${reconnectDelay / 1000}s...`);
-        es.close();
-        setTimeout(() => {
-          reconnectDelay = Math.min(reconnectDelay * 2, 30000);
-          connect();
-        }, reconnectDelay);
-      };
-
-      sseInstance = es;
-    }
-
-    connect();
-
-  }).catch(e => {
-    log(`Import EventSource gagal: ${e.message}`);
-    // Fallback: polling setiap 70 detik
-    log("Fallback ke polling mode...");
-    startPolling();
-  });
-}
-
-// ── Fallback polling (kalau SSE tidak bisa) ──────────────────
-let lastPollRoundId = null;
-async function startPolling() {
-  log("Polling mode aktif (check tiap 70 detik)");
-  await tg("⚠️ <b>Polling Mode</b>\nSSE tidak tersedia, pakai polling tiap 70 detik.");
-
-  async function poll() {
-    try {
-      const round = await apiGet("/api/round/current");
-      const rId   = Number(round.roundId);
-
-      if (rId !== lastPollRoundId) {
-        log(`[Poll] Round baru: ${rId}`);
-        lastPollRoundId = rId;
-
-        // Simulasi roundTransition
-        await onRoundTransition({
-          settled: null,
-          newRound: {
-            roundId: String(rId),
-            endTime: round.endTime,
-          }
-        });
-      }
-    } catch (e) {
-      log(`Poll error: ${e.message}`);
-    }
-    setTimeout(poll, 70000);
+      } catch (e) { log(`SSE parse err: ${e.message}`); }
+    };
+    es.onerror = () => {
+      log(`SSE error. Reconnect ${backoff / 1000}s...`);
+      es.close();
+      setTimeout(() => { backoff = Math.min(backoff * 2, 30000); connect(); }, backoff);
+    };
   }
-
-  poll();
+  connect();
 }
 
 // ── Main ─────────────────────────────────────────────────────
 async function main() {
-  log("=== MineBean Bot v2 Starting ===");
+  log("=== MineBean Bot v3 ===");
   log(`Wallet  : ${wallet.address}`);
-  log(`Rounds  : ${CFG.totalRounds}`);
-  log(`Blok    : ${CFG.blocksPerDeploy} per round`);
-  log(`ETH/rnd : ${CFG.ethPerRound} ETH`);
-  log(`Strategi: ${CFG.strategy}`);
-  log(`Deploy  : ${CFG.deploySecsLeft}s sebelum round habis`);
+  log(`Rounds  : ${CFG.totalRounds} | Blok: ${CFG.blocksPerDeploy} | ETH: ${CFG.ethPerRound}`);
+  log(`Strategi: ${CFG.strategy} | Deploy: ${CFG.deploySecsLeft}s sebelum habis`);
 
-  // Cek network
   const net = await provider.getNetwork();
-  if (net.chainId !== 8453n) {
-    throw new Error(`Chain salah! ${net.chainId} bukan Base (8453)`);
-  }
+  if (net.chainId !== 8453n) throw new Error(`Chain salah: ${net.chainId}`);
   log("✅ Base Mainnet OK");
 
-  // Cek saldo
   const balance = await provider.getBalance(wallet.address);
   const balEth  = parseFloat(ethers.formatEther(balance));
-  const needed  = parseFloat(CFG.ethPerRound) * CFG.totalRounds;
-  log(`Saldo   : ${balEth.toFixed(6)} ETH | Dibutuhkan ~${needed.toFixed(6)} ETH`);
-  if (balEth < needed * 1.1) log("⚠️  Saldo mepet!");
+  log(`Saldo   : ${balEth.toFixed(6)} ETH`);
 
   // EV
-  const evLine = await getEVLine();
+  let evLine = "";
+  try {
+    const [p, r] = await Promise.all([apiGet("/api/price"), apiGet("/api/round/current")]);
+    const price  = parseFloat(p.bean.priceNative);
+    const bpPool = parseFloat(r.beanpotPoolFormatted || "0");
+    const net    = (1.0 * price) + (bpPool * price / 777) - parseFloat(CFG.ethPerRound) * 0.11;
+    evLine = `\n\n📊 <b>EV/round:</b> <code>${net >= 0 ? "+" : ""}${net.toFixed(8)} ETH</code> ${net >= 0 ? "✅" : "⚠️"}`;
+    log(`EV: ${net >= 0 ? "+" : ""}${net.toFixed(8)} ETH`);
+  } catch (e) { log(`EV skip: ${e.message}`); }
 
-  // Notif start
   await tg(
     `🤖 <b>AUTO-MINER STARTED! (${CFG.totalRounds} rounds)</b>\n\n` +
     `Session: <code>${wallet.address.slice(0, 10)}...</code> | PID: <code>${process.pid}</code>\n\n` +
@@ -454,45 +353,35 @@ async function main() {
     evLine
   );
 
-  // Deploy ke round yang sedang berjalan kalau masih ada waktu
+  // Fetch round sekarang dan schedule deploy
   try {
     const round    = await apiGet(`/api/round/current?user=${wallet.address}`);
-    const timeLeft = Number(round.timeRemaining);
     const rId      = Number(round.roundId);
-    lastPollRoundId = rId;
+    const secsLeft = getSecsLeft(round.endTime);  // FIX: pakai endTime bukan timeRemaining
+    currentRoundId = rId;
 
-    log(`Round saat ini: ${rId} | Sisa waktu: ${timeLeft}s`);
+    log(`Round sekarang: ${rId} | endTime: ${round.endTime} | Sisa: ${secsLeft}s`);
 
-    if (timeLeft > CFG.deploySecsLeft + 5) {
-      scheduleDeployForRound(rId, Number(round.endTime));
+    if (secsLeft > CFG.deploySecsLeft + 5) {
+      log(`Ada waktu! Schedule deploy round ${rId} dalam ${secsLeft - CFG.deploySecsLeft}s`);
+      scheduleDeployForRound(rId, round.endTime);
     } else {
-      log(`Waktu sisa terlalu mepet (${timeLeft}s), tunggu round berikutnya.`);
+      log(`Mepet (${secsLeft}s sisa). Tunggu round berikutnya via SSE.`);
     }
   } catch (e) {
-    log(`Tidak bisa fetch round awal: ${e.message}`);
+    log(`Fetch round awal gagal: ${e.message}. Tunggu SSE.`);
   }
 
-  // Connect SSE
   connectSSE();
   log("Bot berjalan ✓");
 }
 
-// ── Graceful shutdown ─────────────────────────────────────────
 process.on("SIGINT", async () => {
-  log("Shutdown (SIGINT)...");
   if (deployTimer) clearTimeout(deployTimer);
-  if (sseInstance) sseInstance.close();
-  await tg(`🛑 <b>Bot Dihentikan</b>\n${roundsDone}/${CFG.totalRounds} rounds selesai.\n🫘 BEAN masih di wallet, klaim di minebean.com`);
+  await tg(`🛑 <b>Bot Dihentikan</b>\n${roundsDone}/${CFG.totalRounds} rounds.\n🫘 BEAN di wallet, klaim di minebean.com`);
   process.exit(0);
 });
-
-process.on("SIGTERM", async () => {
-  log("Shutdown (SIGTERM)...");
-  if (deployTimer) clearTimeout(deployTimer);
-  if (sseInstance) sseInstance.close();
-  process.exit(0);
-});
-
+process.on("SIGTERM", () => { if (deployTimer) clearTimeout(deployTimer); process.exit(0); });
 process.on("unhandledRejection", (r) => log(`[unhandledRejection] ${r}`));
 
 main().catch(async (e) => {
