@@ -1,11 +1,14 @@
 {
   "name": "minebean-bot",
-  "version": "2.0.0",
-  "description": "MineBean Auto Deploy Bot",
+  "version": "4.0.0",
+  "description": "MineBean Auto Deploy Bot v4 — 24/7 on Railway",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "ethers": "^6.13.0",

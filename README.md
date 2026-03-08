@@ -1,77 +1,105 @@
-# 🫘 MineBean Auto Deploy Bot
+# 🫘 MineBean Auto Deploy Bot v4
 
-Bot deploy otomatis tiap round di [MineBean](https://minebean.com) — Base Mainnet.
+Bot deploy otomatis 24/7 di [MineBean](https://minebean.com) — Base Mainnet.
+Based on [official skill doc](https://minebean.com/skill.md).
 
-## Kenapa modal kecil?
+## Features
 
-Fee struktur MineBean sangat kecil:
+- ✅ **24/7 mode** — `TOTAL_ROUNDS=0` untuk jalan terus
+- ✅ **Smart block selection** — prioritas blok kosong & least crowded
+- ✅ **EV calculation** — formula resmi dari skill doc
+- ✅ **Auto-claim ETH & BEAN** — setiap N rounds
+- ✅ **Roasting strategy** — tahan BEAN untuk bonus or claim
+- ✅ **SSE real-time** — terima grid update & round transition live
+- ✅ **Auto-reconnect** — SSE reconnect + state recovery
+- ✅ **Balance check** — skip round jika saldo kurang
+- ✅ **Telegram notifications** — full status report
+- ✅ **Railway ready** — SIGTERM handling, graceful shutdown
+
+## Fee Structure
+
 - **1% admin fee** dari total pool
-- **~10% vault fee** dari losers pool SAJA (bukan dari modal kamu)
-- Tujuan utama = **dapat 1 BEAN per round**, bukan profit dari ETH
+- **~10% vault fee** dari losers pool saja
+- **10% roasting fee** pada BEAN claim (unroasted saja)
+- Modal minimum: `0.0000025 ETH × jumlah_blok`
 
-Modal minimum hanya `0.0000025 ETH × jumlah_blok`:
-- 5 blok = **0.0000125 ETH/round** (~$0.00003)
-- 10 blok = **0.000025 ETH/round** (~$0.00006)
+## Deploy ke Railway (Recommended)
 
-## Setup
+### 1. Push ke GitHub
+```bash
+git add .
+git commit -m "MineBean Bot v4"
+git push origin main
+```
 
-### 1. Isi .env
-
-Rename `.env.example` → `.env`, lalu isi:
+### 2. Railway Setup
+1. [railway.app](https://railway.app) → **New Project → Deploy from GitHub**
+2. Pilih repo ini
+3. Tab **Variables** → paste semua variable (RAW Editor):
 
 ```
 PRIVATE_KEY=0x...
-TELEGRAM_BOT_TOKEN=...   ← dari @BotFather
-TELEGRAM_CHAT_ID=...     ← dari @userinfobot
-TOTAL_ROUNDS=10
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+TOTAL_ROUNDS=0
+BLOCKS_PER_DEPLOY=5
 ETH_PER_ROUND=0.0000125
+BLOCK_STRATEGY=least_crowded
+DEPLOY_AT_SECONDS_LEFT=15
+CLAIM_EVERY_N_ROUNDS=5
+HOLD_BEAN=false
 ```
 
-### 2. Deploy ke Railway
+4. Bot langsung jalan 24/7! 🚀
 
-1. Push ke GitHub (`.env` JANGAN ikut — sudah ada di .gitignore)
-2. Railway → **New Project → Deploy from GitHub**
-3. Di tab **Variables**, paste semua isi `.env` kamu (pakai RAW Editor)
-4. Bot langsung jalan!
-
-### 3. Local
-
+### 3. Local (Testing)
 ```bash
 npm install
+cp .env.example .env
+# Edit .env with your keys
 npm start
 ```
 
-## Notif Telegram
-
-```
-🤖 AUTO-MINER STARTED! (10 rounds)   ← saat bot start
-🎯 AUTO-MINER RUNNING                 ← sebelum deploy
-✅ Round 1/10 completed               ← setelah TX confirm
-   Deployed: Blocks [14, 15, 16, 17, 18]
-   TX: 0x1f41...6454e
-   ⏳ Waiting for next round (~60s)...
-💰 ETH Claimed                        ← tiap N rounds
-📊 Status Report                      ← PnL, BEAN pending
-🏁 AUTO-MINER SELESAI!                ← akhir session
-```
-
-## .env lengkap
+## Environment Variables
 
 | Variable | Default | Keterangan |
 |---|---|---|
 | `PRIVATE_KEY` | **wajib** | Private key wallet |
-| `TELEGRAM_BOT_TOKEN` | **wajib** | Token bot Telegram |
-| `TELEGRAM_CHAT_ID` | **wajib** | Chat ID kamu |
-| `TOTAL_ROUNDS` | `10` | Berapa round dijalankan |
-| `BLOCKS_PER_DEPLOY` | `5` | Blok per round |
-| `ETH_PER_ROUND` | `0.0000125` | ETH per round (min 0.0000025 × blok) |
+| `TELEGRAM_BOT_TOKEN` | opsional | Token bot Telegram |
+| `TELEGRAM_CHAT_ID` | opsional | Chat ID kamu |
+| `TOTAL_ROUNDS` | `0` | 0 = unlimited 24/7 |
+| `BLOCKS_PER_DEPLOY` | `5` | Blok per round (1-25) |
+| `ETH_PER_ROUND` | `0.0000125` | ETH per round |
 | `BLOCK_STRATEGY` | `least_crowded` | `least_crowded` atau `random` |
-| `DEPLOY_AT_SECONDS_LEFT` | `15` | Deploy X detik sebelum round habis |
-| `CLAIM_EVERY_N_ROUNDS` | `5` | Claim ETH tiap N rounds |
+| `DEPLOY_AT_SECONDS_LEFT` | `15` | Deploy X detik sebelum habis |
+| `CLAIM_EVERY_N_ROUNDS` | `5` | Claim ETH/BEAN tiap N rounds |
 | `CLAIM_ETH_MIN` | `0.0005` | Min ETH pending untuk claim |
+| `CLAIM_BEAN_MIN` | `1.0` | Min BEAN pending untuk claim |
+| `HOLD_BEAN` | `false` | `true` = tahan BEAN (roasting bonus) |
+| `MIN_BALANCE_ETH` | `0.0005` | Min saldo ETH |
+| `BASE_RPC_URL` | `https://mainnet.base.org` | RPC URL |
+
+## Strategi
+
+### Block Selection
+- **least_crowded**: Pilih blok dengan miner paling sedikit → share reward lebih besar jika menang
+- **random**: Pilih blok acak
+
+### BEAN Management
+- **HOLD_BEAN=true**: Tahan BEAN → dapat passive roasting bonus (10% dari claim orang lain)
+- **HOLD_BEAN=false**: Claim BEAN reguler, lalu stake manual di minebean.com
+
+### EV Formula (dari skill doc)
+```
+Net EV = BEAN_value + Beanpot_EV − House_cost
+BEAN_value = 1 BEAN × priceNative
+Beanpot_EV = (1/777) × beanpotPool × priceNative  
+House_cost = ETH_deployed × 0.11
+```
 
 ## Catatan
 
-- **BEAN tidak di-stake otomatis** — ada di wallet, klaim manual di minebean.com kapanpun
-- Gunakan wallet dedicated, bukan wallet utama
-- Base RPC publik kadang lambat — pakai Alchemy/Infura untuk lebih stabil
+- Gunakan **wallet dedicated**, bukan wallet utama
+- Base RPC publik kadang lambat — pakai Alchemy/Infura untuk Railway
+- BEAN bisa di-stake di minebean.com untuk yield dari treasury buybacks
+- Beanpot jackpot: ~0.13% chance per round, pool terus tumbuh
