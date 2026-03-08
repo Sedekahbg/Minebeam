@@ -1,6 +1,6 @@
 {
   "name": "minebean-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MineBean Auto Deploy Bot",
   "main": "src/index.js",
   "type": "module",
