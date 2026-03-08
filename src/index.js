@@ -420,42 +420,53 @@ async function calculateEV() {
   }
 }
 
-// ── Block Selection ──────────────────────────────────────────
+// ── Block Selection (Hybrid: least_crowded + random) ─────────
 function pickBlocks(blocks) {
   const n = CFG.blocksPerDeploy;
 
-  if (!blocks || blocks.length === 0) {
-    const all = Array.from({ length: 25 }, (_, i) => i);
-    for (let i = 24; i > 0; i--) {
+  // Helper: shuffle array
+  function shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [all[i], all[j]] = [all[j], all[i]];
+      [a[i], a[j]] = [a[j], a[i]];
     }
-    return all.slice(0, n).sort((a, b) => a - b);
+    return a;
+  }
+
+  if (!blocks || blocks.length === 0) {
+    return shuffle(Array.from({ length: 25 }, (_, i) => i)).slice(0, n).sort((a, b) => a - b);
   }
 
   if (CFG.strategy === "least_crowded") {
-    return [...blocks]
-      .sort((a, b) => {
-        const aMiners = a.minerCount || 0;
-        const bMiners = b.minerCount || 0;
-        const aDeployed = parseFloat(a.deployedFormatted || "0");
-        const bDeployed = parseFloat(b.deployedFormatted || "0");
-        if (aMiners === 0 && bMiners !== 0) return -1;
-        if (bMiners === 0 && aMiners !== 0) return 1;
-        if (aMiners !== bMiners) return aMiners - bMiners;
-        return aDeployed - bDeployed;
-      })
-      .slice(0, n)
-      .map(b => b.id)
-      .sort((a, b) => a - b);
+    // Hybrid: ~60% least crowded, ~40% random for diversification
+    const lcCount = Math.ceil(n * 0.6);   // e.g. 3 out of 5
+    const rndCount = n - lcCount;           // e.g. 2 out of 5
+
+    // Sort by least crowded
+    const sorted = [...blocks].sort((a, b) => {
+      const aMiners = a.minerCount || 0;
+      const bMiners = b.minerCount || 0;
+      const aDeployed = parseFloat(a.deployedFormatted || "0");
+      const bDeployed = parseFloat(b.deployedFormatted || "0");
+      if (aMiners === 0 && bMiners !== 0) return -1;
+      if (bMiners === 0 && aMiners !== 0) return 1;
+      if (aMiners !== bMiners) return aMiners - bMiners;
+      return aDeployed - bDeployed;
+    });
+
+    // Pick top least crowded
+    const lcBlocks = sorted.slice(0, lcCount).map(b => b.id);
+
+    // Pick random blocks from remaining
+    const remaining = sorted.slice(lcCount).map(b => b.id);
+    const rndBlocks = shuffle(remaining).slice(0, rndCount);
+
+    return [...lcBlocks, ...rndBlocks].sort((a, b) => a - b);
   }
 
-  const all = Array.from({ length: 25 }, (_, i) => i);
-  for (let i = 24; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [all[i], all[j]] = [all[j], all[i]];
-  }
-  return all.slice(0, n).sort((a, b) => a - b);
+  // Pure random
+  return shuffle(Array.from({ length: 25 }, (_, i) => i)).slice(0, n).sort((a, b) => a - b);
 }
 
 // ── Balance Check ────────────────────────────────────────────
