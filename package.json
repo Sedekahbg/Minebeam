@@ -1,0 +1,16 @@
+{
+  "name": "minebean-bot",
+  "version": "1.0.0",
+  "description": "MineBean Auto Deploy Bot",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "eventsource": "^2.0.2",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.5"
+  }
+}
