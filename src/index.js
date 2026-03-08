@@ -649,7 +649,7 @@ async function main() {
 
     log(`Round sekarang: ${rId} | endTime: ${round.endTime} | Sisa: ${secsLeft}s`);
 
-    if (secsLeft > CFG.deploySecsLeft + 5) {
+    if (secsLeft > CFG.deploySecsLeft + 2) {
       log(`Ada waktu! Schedule deploy round ${rId} dalam ${secsLeft - CFG.deploySecsLeft}s`);
       scheduleDeployForRound(rId, round.endTime);
     } else {
