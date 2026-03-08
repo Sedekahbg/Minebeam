@@ -187,7 +187,7 @@ function pickBlocks(blocks) {
 async function checkBalance() {
   const balance = await provider.getBalance(wallet.address);
   const balEth = parseFloat(ethers.formatEther(balance));
-  const needed = parseFloat(CFG.ethPerRound) + 0.0001; // + gas margin
+  const needed = parseFloat(CFG.ethPerRound) + 0.00002; // + gas margin (Base gas is cheap)
   const minBal = parseFloat(CFG.minBalance);
 
   if (balEth < needed) {
@@ -218,6 +218,7 @@ async function doDeploy(roundId) {
   // Balance check
   const hasBalance = await checkBalance();
   if (!hasBalance) {
+    deploying = false;
     await tg(`⚠️ <b>Skip Round ${roundId}</b>\nSaldo ETH tidak cukup untuk deploy.`);
     return;
   }
@@ -236,6 +237,7 @@ async function doDeploy(roundId) {
   // Cek round tidak sudah berganti
   if (round.roundId && Number(round.roundId) !== Number(roundId)) {
     log(`Round ${roundId} sudah kedaluwarsa (now: ${round.roundId}), skip.`);
+    deploying = false;
     return;
   }
 
@@ -243,6 +245,7 @@ async function doDeploy(roundId) {
   const secsLeft = getSecsLeft(round.endTime);
   if (secsLeft < 3) {
     log(`Round ${roundId}: tinggal ${secsLeft}s, terlalu mepet, skip.`);
+    deploying = false;
     return;
   }
 
@@ -281,11 +284,14 @@ async function doDeploy(roundId) {
     log(`Deploy error: ${e.message}`);
     if (e.message.includes("AlreadyDeployedThisRound")) {
       deployedThisRnd = true;
+      deploying = false;
       log("AlreadyDeployedThisRound — dianggap sudah deploy.");
       return;
     }
     deployedThisRnd = false;
     await tg(`❌ <b>Deploy Gagal Round ${roundId}</b>\n<code>${e.message.slice(0, 200)}</code>`);
+  } finally {
+    deploying = false;
   }
 }
 
@@ -496,22 +502,49 @@ function connectSSE() {
       backoff = 3000;
     };
 
+    // SSE named event handlers (server sends event: type)
+    es.addEventListener("heartbeat", (event) => {
+      log("SSE heartbeat ✓");
+    });
+
+    es.addEventListener("deployed", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && data.blocks) {
+          lastGridData = data.blocks;
+        }
+      } catch (e) { log(`SSE deployed parse err: ${e.message}`); }
+    });
+
+    es.addEventListener("roundTransition", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        log("roundTransition diterima ✓");
+        onRoundTransition(data).catch(e => log(`onRoundTransition err: ${e.message}`));
+      } catch (e) { log(`SSE roundTransition parse err: ${e.message}`); }
+    });
+
+    // Fallback: onmessage catches events with no named type (JSON-wrapped format)
     es.onmessage = (event) => {
       try {
-        const { type, data } = JSON.parse(event.data);
+        const parsed = JSON.parse(event.data);
+        const type = parsed.type;
+        const data = parsed.data || parsed;
 
         if (type === "heartbeat") {
-          log("SSE heartbeat ✓");
+          log("SSE heartbeat ✓ (fallback)");
         }
         else if (type === "deployed") {
-          // Update grid cache from real-time SSE data
           if (data && data.blocks) {
             lastGridData = data.blocks;
           }
         }
         else if (type === "roundTransition") {
-          log("roundTransition diterima");
+          log("roundTransition diterima ✓ (fallback)");
           onRoundTransition(data).catch(e => log(`onRoundTransition err: ${e.message}`));
+        }
+        else {
+          log(`SSE unknown type: ${type}`);
         }
       } catch (e) { log(`SSE parse err: ${e.message}`); }
     };
