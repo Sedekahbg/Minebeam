@@ -23,7 +23,7 @@ const CFG = {
   claimEthMin: parseFloat(process.env.CLAIM_ETH_MIN) || 0.0005,
   claimBeanMin: parseFloat(process.env.CLAIM_BEAN_MIN) || 1.0,
   holdBean: process.env.HOLD_BEAN === "true",            // true = tahan BEAN (roasting bonus)
-  minBalance: process.env.MIN_BALANCE_ETH || "0.0005",
+  minBalance: process.env.MIN_BALANCE_ETH || "0.00005",
 };
 
 // Auto-fix minimum ETH
@@ -561,7 +561,7 @@ async function main() {
   log(`Saldo   : ${balEth.toFixed(6)} ETH`);
 
   if (balEth < parseFloat(CFG.minBalance)) {
-    throw new Error(`Saldo terlalu kecil: ${balEth.toFixed(6)} ETH < minimum ${CFG.minBalance} ETH`);
+    log(`⚠️ Saldo rendah: ${balEth.toFixed(6)} ETH < minimum ${CFG.minBalance} ETH — tetap jalan, skip round jika kurang`);
   }
 
   // BEAN balance
