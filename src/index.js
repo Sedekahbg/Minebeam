@@ -74,6 +74,7 @@ let deployTimer = null;
 let currentRoundId = null;
 let sseInstance = null;
 let lastGridData = null;   // cache grid dari SSE deployed events
+let deploying = false;     // lock to prevent concurrent deploys
 
 // ── Helpers ──────────────────────────────────────────────────
 const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -206,6 +207,11 @@ async function doDeploy(roundId) {
     log(`Round ${roundId}: sudah deploy, skip.`);
     return;
   }
+  if (deploying) {
+    log(`Round ${roundId}: deploy sedang berjalan, skip duplicate.`);
+    return;
+  }
+  deploying = true;
 
   log(`Round ${roundId}: mulai deploy...`);
 
